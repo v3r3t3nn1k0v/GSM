@@ -1,0 +1,8 @@
+aiogram>=3.15,<4
+alembic>=1.14,<2
+asyncpg>=0.30
+celery[redis]>=5.4,<6
+pydantic>=2.9,<3
+pydantic-settings>=2.7,<3
+redis>=5.2,<7
+SQLAlchemy[asyncio]>=2.0.36,<3

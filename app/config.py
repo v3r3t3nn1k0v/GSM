@@ -1,0 +1,37 @@
+from functools import lru_cache
+from typing import Annotated
+
+from pydantic import field_validator
+from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
+
+
+class Settings(BaseSettings):
+    """Настройки приложения, читаются из .env."""
+
+    model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", extra="ignore")
+
+    bot_token: str
+    database_url: str
+    redis_url: str = "redis://localhost:6379/0"
+    # Ссылка на Telegram-канал для кнопки «Подписаться» (пустая — кнопки не будет)
+    channel_url: str = ""
+
+    # NoDecode: строка "1,2,3" из .env парсится нашим валидатором, а не как JSON
+    # Админы и менеджеры — один и тот же список прав: и панель, и приём заявок
+    admin_ids: Annotated[list[int], NoDecode] = []
+
+    reminder_delay_minutes: int = 60
+    reminder_max_count: int = 1
+
+    @field_validator("admin_ids", mode="before")
+    @classmethod
+    def parse_id_list(cls, value: object) -> object:
+        """Поддержка формата ADMIN_IDS=1,2,3 из .env."""
+        if isinstance(value, str):
+            return [int(item) for item in value.replace(" ", "").split(",") if item]
+        return value
+
+
+@lru_cache
+def get_settings() -> Settings:
+    return Settings()
