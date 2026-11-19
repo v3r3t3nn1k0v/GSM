@@ -8,6 +8,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.applications.models import ApplicationStatus
 from app.applications.service import ApplicationService
+from app.users.models import UserStatus
 from app.users.service import UserService
 from bot.application.keyboards import ProcessedCallback
 
@@ -16,7 +17,11 @@ from .keyboards import (
     APPS_ACTIVE,
     APPS_ALL,
     APPS_PROCESSED,
+    AUD_AGENTS,
+    AUD_ALL,
+    AUD_CONSUMERS,
     AdminAction,
+    BroadcastAudience,
     ACTION_APPS,
     ACTION_BROADCAST,
     ACTION_BROADCAST_CANCEL,
@@ -26,12 +31,14 @@ from .keyboards import (
     admin_menu_keyboard,
     applications_keyboard,
     back_to_menu_keyboard,
+    broadcast_audience_keyboard,
     broadcast_confirm_keyboard,
 )
 from .states import BroadcastStates
 from .texts import (
     ADMIN_MENU_TEXT,
     BROADCAST_ASK,
+    BROADCAST_AUDIENCE,
     BROADCAST_CANCELLED,
     BROADCAST_DONE,
     BROADCAST_EMPTY,
@@ -47,6 +54,18 @@ _APPS_FILTER_STATUS: dict[str, ApplicationStatus | None] = {
     APPS_ACTIVE: ApplicationStatus.filled,
     APPS_PROCESSED: ApplicationStatus.processed,
     APPS_ALL: None,
+}
+
+# Аудитория рассылки → статус пользователя в БД
+_BROADCAST_AUDIENCE_STATUS: dict[str, UserStatus | None] = {
+    AUD_CONSUMERS: UserStatus.consumer,
+    AUD_AGENTS: UserStatus.agent,
+    AUD_ALL: None,
+}
+_BROADCAST_AUDIENCE_LABEL = {
+    AUD_CONSUMERS: "потребителям",
+    AUD_AGENTS: "агентам",
+    AUD_ALL: "всем",
 }
 
 
@@ -123,10 +142,27 @@ async def receive_broadcast_message(message: Message, state: FSMContext) -> None
         await message.answer(BROADCAST_EMPTY)
         return
     await state.update_data(broadcast_text=text)
-    await state.set_state(BroadcastStates.waiting_confirm)
+    await state.set_state(BroadcastStates.waiting_audience)
     # Предпросмотр без разметки, чтобы админ видел ровно то, что получат пользователи
     await message.answer(text, parse_mode=None)
-    await message.answer(BROADCAST_PREVIEW, reply_markup=broadcast_confirm_keyboard())
+    await message.answer(BROADCAST_AUDIENCE, reply_markup=broadcast_audience_keyboard())
+
+
+async def choose_broadcast_audience(
+    callback: CallbackQuery, callback_data: BroadcastAudience, state: FSMContext
+) -> None:
+    """Выбор аудитории рассылки: потребители / агенты / все."""
+    audience = callback_data.audience
+    if audience not in _BROADCAST_AUDIENCE_STATUS:
+        audience = AUD_ALL
+    await state.update_data(broadcast_audience=audience)
+    await state.set_state(BroadcastStates.waiting_confirm)
+    await _edit(
+        callback,
+        BROADCAST_PREVIEW.format(audience=_BROADCAST_AUDIENCE_LABEL[audience]),
+        broadcast_confirm_keyboard(),
+    )
+    await callback.answer()
 
 
 async def confirm_broadcast(
@@ -134,24 +170,32 @@ async def confirm_broadcast(
 ) -> None:
     data = await state.get_data()
     text = data.get("broadcast_text")
+    audience = data.get("broadcast_audience", AUD_ALL)
     await state.clear()
     if not text:
         await _edit(callback, ADMIN_MENU_TEXT, admin_menu_keyboard())
         await callback.answer()
         return
 
-    telegram_ids = await UserService(session).all_telegram_ids()
+    status = _BROADCAST_AUDIENCE_STATUS.get(audience)
+    telegram_ids = await UserService(session).all_telegram_ids(status=status)
     sent = failed = 0
     for telegram_id in telegram_ids:
         try:
             await callback.bot.send_message(telegram_id, text, parse_mode=None)
             sent += 1
         except TelegramAPIError:
+            # Пользователь заблокировал бота или чат недоступен — пропускаем
             failed += 1
         await asyncio.sleep(0.05)  # мягкий лимит Telegram
 
     await callback.message.answer(
-        BROADCAST_DONE.format(sent=sent, failed=failed, total=len(telegram_ids))
+        BROADCAST_DONE.format(
+            audience=_BROADCAST_AUDIENCE_LABEL.get(audience, "всем"),
+            sent=sent,
+            failed=failed,
+            total=len(telegram_ids),
+        )
     )
     await _edit(callback, ADMIN_MENU_TEXT, admin_menu_keyboard())
     await callback.answer("Готово")

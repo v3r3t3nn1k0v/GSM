@@ -298,7 +298,7 @@ async def _finish_application(
 ) -> None:
     await ApplicationService(session).complete(application)
     await state.clear()
-    await message.answer(APPLICATION_DONE.format(application_id=application.id))
+    await message.answer(APPLICATION_DONE)
     await _notify_managers(message.bot, application)
 
 

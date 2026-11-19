@@ -3,7 +3,7 @@ from datetime import datetime
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.users.models import User
+from app.users.models import User, UserStatus
 
 
 class UserRepository:
@@ -42,6 +42,10 @@ class UserRepository:
         stmt = select(func.count()).select_from(User).where(User.created_at >= since)
         return (await self.session.execute(stmt)).scalar_one()
 
-    async def all_telegram_ids(self) -> list[int]:
-        stmt = select(User.telegram_id).order_by(User.id)
+    async def all_telegram_ids(self, status: UserStatus | None = None) -> list[int]:
+        """ID всех пользователей (или только указанного статуса — для рассылок)."""
+        stmt = select(User.telegram_id)
+        if status is not None:
+            stmt = stmt.where(User.status == status)
+        stmt = stmt.order_by(User.id)
         return list((await self.session.execute(stmt)).scalars().all())

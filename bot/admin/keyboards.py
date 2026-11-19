@@ -11,6 +11,17 @@ ACTION_BROADCAST = "broadcast"
 ACTION_BROADCAST_CONFIRM = "broadcast_confirm"
 ACTION_BROADCAST_CANCEL = "broadcast_cancel"
 
+# Аудитории рассылки
+AUD_ALL = "all"
+AUD_CONSUMERS = "consumers"
+AUD_AGENTS = "agents"
+
+
+class BroadcastAudience(CallbackData, prefix="broadcast"):
+    """Выбор аудитории рассылки."""
+
+    audience: str
+
 # Фильтры списка заявок
 APPS_ACTIVE = "active"      # заполнены, ждут обработки
 APPS_PROCESSED = "processed"
@@ -90,6 +101,20 @@ def broadcast_confirm_keyboard() -> InlineKeyboardMarkup:
     builder.button(
         text="❌ Отмена", callback_data=AdminAction(action=ACTION_BROADCAST_CANCEL)
     )
+    builder.adjust(2)
+    return builder.as_markup()
+
+
+def broadcast_audience_keyboard() -> InlineKeyboardMarkup:
+    """Кому разослать сообщение."""
+    builder = InlineKeyboardBuilder()
+    builder.button(
+        text="⛽ Потребителям", callback_data=BroadcastAudience(audience=AUD_CONSUMERS)
+    )
+    builder.button(
+        text="🤝 Агентам", callback_data=BroadcastAudience(audience=AUD_AGENTS)
+    )
+    builder.button(text="👥 Всем", callback_data=BroadcastAudience(audience=AUD_ALL))
     builder.adjust(2)
     return builder.as_markup()
 

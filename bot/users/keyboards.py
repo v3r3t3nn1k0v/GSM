@@ -1,20 +1,19 @@
 from aiogram.types import InlineKeyboardMarkup
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 
-from bot.application.keyboards import START_APPLICATION_CB
-from bot.partnership.keyboards import PARTNERSHIP_OFFER_CB
-
 # Колбэк кнопки «Я подписался» (см. SubscriptionMiddleware)
 CHECK_SUBSCRIPTION_CB = "users:check_subscription"
 
+# Варианты входа в бота
+ROLE_CONSUMER_CB = "users:role:consumer"
+ROLE_NEWS_CB = "users:role:news"
 
-def start_keyboard() -> InlineKeyboardMarkup:
-    """Стартовая развилка: заявка или партнёрская программа."""
+
+def role_keyboard() -> InlineKeyboardMarkup:
+    """Стартовый выбор: топливо для бизнеса или новости."""
     builder = InlineKeyboardBuilder()
-    builder.button(text="⛽ Заполнить заявку", callback_data=START_APPLICATION_CB)
-    builder.button(
-        text="🤝 Партнёрская программа", callback_data=PARTNERSHIP_OFFER_CB
-    )
+    builder.button(text="⛽ Топливо для бизнеса или работы", callback_data=ROLE_CONSUMER_CB)
+    builder.button(text="📰 Новости про топливо", callback_data=ROLE_NEWS_CB)
     builder.adjust(1)
     return builder.as_markup()
 

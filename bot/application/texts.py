@@ -24,10 +24,7 @@ COMMAND_DURING_FORM = (
     "или нажмите /start, чтобы начать заново."
 )
 STALE_APPLICATION = "Эта заявка уже неактуальна. Нажмите /start, чтобы начать новую."
-APPLICATION_DONE = (
-    "✅ Спасибо! Заявка №{application_id} принята.\n\n"
-    "Менеджер свяжется с Вами в ближайшее время."
-)
+APPLICATION_DONE = "✅ Спасибо! Заявка отправлена, менеджер свяжется с Вами в ближайшее время."
 
 
 def manager_application_text(

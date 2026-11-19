@@ -13,6 +13,7 @@ class LogEvent(str, enum.Enum):
     new_application = "new_application"
     reminder_sent = "reminder_sent"
     application_processed = "application_processed"
+    agent_registered = "agent_registered"
 
 
 class LogEntry(Base):

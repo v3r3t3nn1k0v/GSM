@@ -13,10 +13,10 @@ from app.config import get_settings
 from app.db.session import make_session_pool
 from app.telegram import create_bot
 from bot.admin.routers import router as admin_router
+from bot.agent.routers import router as agent_router
 from bot.application.routers import router as application_router
 from bot.middlewares.db import DbSessionMiddleware
 from bot.middlewares.subscription import SubscriptionMiddleware
-from bot.partnership.routers import router as partnership_router
 from bot.users.routers import router as users_router
 
 logger = logging.getLogger(__name__)
@@ -74,10 +74,11 @@ async def main() -> None:
     dp.message.outer_middleware(subscription_mw)
     dp.callback_query.outer_middleware(subscription_mw)
 
-    # Порядок важен: /start должен перехватываться раньше state-хендлеров анкеты
+    # Порядок важен: /start и выбор роли должны перехватываться раньше
+    # state-хендлеров анкеты
     dp.include_router(users_router)
     dp.include_router(admin_router)
-    dp.include_router(partnership_router)
+    dp.include_router(agent_router)
     dp.include_router(application_router)
 
     try:

@@ -13,6 +13,7 @@ from .keyboards import (
     ACTION_MENU,
     ACTION_STATS,
     AdminAction,
+    BroadcastAudience,
 )
 from .states import BroadcastStates
 
@@ -34,6 +35,11 @@ router.callback_query.register(
 )
 router.callback_query.register(
     handlers.start_broadcast, AdminAction.filter(F.action == ACTION_BROADCAST)
+)
+router.callback_query.register(
+    handlers.choose_broadcast_audience,
+    BroadcastAudience.filter(),
+    StateFilter(BroadcastStates.waiting_audience),
 )
 router.callback_query.register(
     handlers.confirm_broadcast,

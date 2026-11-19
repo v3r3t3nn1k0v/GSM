@@ -4,7 +4,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.logs.models import LogEvent
 from app.logs.service import LogService
-from app.users.models import User
+from app.users.models import User, UserStatus
 from app.users.repository import UserRepository
 from app.users.schemas import UserStats
 
@@ -58,5 +58,19 @@ class UserService:
         new_today = await self.repository.count_created_since(today_start)
         return UserStats(total=total, new_today=new_today)
 
-    async def all_telegram_ids(self) -> list[int]:
-        return await self.repository.all_telegram_ids()
+    async def set_status(self, user: User, status: UserStatus) -> None:
+        """Меняем роль пользователя (потребитель/агент)."""
+        user.status = status
+
+    async def register_agent(self, user: User, phone: str) -> None:
+        """Анкета агента завершена: фиксируем статус, телефон и событие в журнале."""
+        user.status = UserStatus.agent
+        user.phone = phone
+        await self.logs.log(
+            LogEvent.agent_registered,
+            user_id=user.id,
+            payload={"phone": phone, "username": user.username},
+        )
+
+    async def all_telegram_ids(self, status: UserStatus | None = None) -> list[int]:
+        return await self.repository.all_telegram_ids(status)
