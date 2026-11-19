@@ -15,6 +15,7 @@ from app.telegram import create_bot
 from bot.admin.routers import router as admin_router
 from bot.application.routers import router as application_router
 from bot.middlewares.db import DbSessionMiddleware
+from bot.middlewares.subscription import SubscriptionMiddleware
 from bot.partnership.routers import router as partnership_router
 from bot.users.routers import router as users_router
 
@@ -67,6 +68,11 @@ async def main() -> None:
     bot = create_bot(settings)
     dp = Dispatcher(storage=storage)
     dp.update.middleware(DbSessionMiddleware(session_pool))
+    # Гейт подписки на канал: до хендлеров доходит только подписанный
+    # (TELEGRAM_CHANNEL_ID пуст — проверка не выполняется)
+    subscription_mw = SubscriptionMiddleware(settings)
+    dp.message.outer_middleware(subscription_mw)
+    dp.callback_query.outer_middleware(subscription_mw)
 
     # Порядок важен: /start должен перехватываться раньше state-хендлеров анкеты
     dp.include_router(users_router)
