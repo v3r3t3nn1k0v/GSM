@@ -21,12 +21,39 @@ docker compose up --build
 | Переменная | Описание |
 |---|---|
 | `BOT_TOKEN` | токен от @BotFather |
+| `TG_PROXY_URL` | прокси для доступа к Telegram API (`socks5://user:pass@host:port`, `socks4://`, `http(s)://`); пусто — напрямую. Нужен, если VPS не может обращаться к `api.telegram.org` |
 | `DATABASE_URL` | `postgresql+asyncpg://gsm:gsm@db:5432/gsm` (в docker) |
 | `REDIS_URL` | `redis://redis:6379/0` (в docker) |
 | `ADMIN_IDS` | ID администраторов (= менеджеров) через запятую: доступ к `/admin`, приём заявок, кнопка «Обработана» |
 | `REMINDER_DELAY_MINUTES` | через сколько минут простоя слать напоминание (60) |
 | `REMINDER_MAX_COUNT` | максимум напоминаний на заявку (1) |
 | `CHANNEL_URL` | ссылка на Telegram-канал для кнопки «Подписаться» (пустая — кнопки не будет) |
+
+## VPS не видит Telegram: `TelegramNetworkError: Request timeout error`
+
+Первый запрос бота — `get_me()` к `api.telegram.org`. Таймаут на нём означает,
+что сервер не может обратиться к Telegram напрямую (частая ситуация на хостингах
+в РФ — они блокируют Telegram API). Приложение при этом не падает, а ждёт связи
+и повторяет попытку каждые 15 секунд; чтобы бот заработал, поднимите прокси
+и укажите его в `TG_PROXY_URL`.
+
+Вариант без установки чего-либо — SOCKS5-туннель по SSH до любой машины,
+где Telegram доступен (запускать на VPS):
+
+```bash
+ssh -N -D 172.17.0.1:1080 user@foreign-server
+```
+
+и в `.env` (адрес `172.17.0.1` — это хост VPS, каким его видят контейнеры;
+если у Docker другая подсеть, см. `ip addr show docker0`):
+
+```
+TG_PROXY_URL=socks5://172.17.0.1:1080
+```
+
+Подойдёт и любой внешний/платный прокси в формате
+`socks5://user:pass@host:port` или `http://host:port`. После правки `.env`:
+`docker compose up -d --force-recreate bot worker`.
 
 ## Логика
 

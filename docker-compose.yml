@@ -32,6 +32,10 @@ services:
     restart: unless-stopped
     env_file: .env
     command: python -m bot.main
+    # Чтобы работал TG_PROXY_URL=socks5://host.docker.internal:<port> —
+    # прокси, поднятый на самом сервере
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     depends_on:
       db:
         condition: service_healthy
@@ -43,6 +47,8 @@ services:
     restart: unless-stopped
     env_file: .env
     command: celery -A app.reminders.celery_app.celery_app worker --loglevel=info
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     depends_on:
       db:
         condition: service_healthy

@@ -13,6 +13,9 @@ class Settings(BaseSettings):
     bot_token: str
     database_url: str
     redis_url: str = "redis://localhost:6379/0"
+    # Прокси для доступа к api.telegram.org (socks5://, socks4://, http(s)://).
+    # Нужен, если VPS не может обращаться к Telegram напрямую.
+    tg_proxy_url: str = ""
     # Ссылка на Telegram-канал для кнопки «Подписаться» (пустая — кнопки не будет)
     channel_url: str = ""
 

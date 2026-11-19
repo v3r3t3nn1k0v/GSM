@@ -1,7 +1,6 @@
 import asyncio
 import logging
 
-from aiogram import Bot
 from aiogram.exceptions import TelegramAPIError
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
@@ -9,6 +8,7 @@ from app.applications.models import Application
 from app.applications.service import ApplicationService
 from app.config import get_settings
 from app.reminders.celery_app import celery_app
+from app.telegram import create_bot
 
 logger = logging.getLogger(__name__)
 
@@ -40,7 +40,7 @@ async def _send_pending_reminders() -> int:
             if not stale:
                 return 0
             logger.info("Заявок к напоминанию: %s", len(stale))
-            async with Bot(settings.bot_token) as bot:
+            async with create_bot(settings) as bot:
                 for application in stale:
                     delivered = await _remind_user(bot, application)
                     await service.mark_reminder_sent(application, delivered=delivered)
