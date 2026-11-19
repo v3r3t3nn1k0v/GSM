@@ -1,7 +1,10 @@
 import asyncio
 import logging
 
+from aiohttp import ClientError
+from aiogram import Bot
 from aiogram.exceptions import TelegramAPIError
+from python_socks import ProxyError
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from app.applications.models import Application
@@ -55,7 +58,7 @@ async def _send_pending_reminders() -> int:
 async def _remind_user(bot: Bot, application: Application) -> bool:
     try:
         await bot.send_message(application.user.telegram_id, REMINDER_TEXT)
-    except TelegramAPIError as exc:
+    except (TelegramAPIError, ClientError, ProxyError) as exc:
         logger.warning(
             "Напоминание по заявке №%s не доставлено (telegram_id=%s): %r",
             application.id,

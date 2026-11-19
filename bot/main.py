@@ -1,11 +1,13 @@
 import asyncio
 import logging
 
+from aiohttp import ClientError
 from alembic import command
 from alembic.config import Config as AlembicConfig
 from aiogram import Bot, Dispatcher
 from aiogram.exceptions import TelegramNetworkError
 from aiogram.fsm.storage.redis import RedisStorage
+from python_socks import ProxyError
 
 from app.config import get_settings
 from app.db.session import make_session_pool
@@ -40,7 +42,7 @@ async def wait_for_telegram(bot: Bot) -> None:
             me = await bot.get_me()
             logger.info("Связь с Telegram установлена: @%s (id=%s)", me.username, me.id)
             return
-        except TelegramNetworkError as exc:
+        except (TelegramNetworkError, ClientError, ProxyError) as exc:
             logger.error(
                 "Нет доступа к api.telegram.org: %s. Повтор через %s с. "
                 "Если хостинг блокирует Telegram, укажите TG_PROXY_URL в .env.",

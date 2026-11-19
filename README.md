@@ -37,19 +37,52 @@ docker compose up --build
 и повторяет попытку каждые 15 секунд; чтобы бот заработал, поднимите прокси
 и укажите его в `TG_PROXY_URL`.
 
-Вариант без установки чего-либо — SOCKS5-туннель по SSH до любой машины,
-где Telegram доступен (запускать на VPS):
+Вариант без покупки прокси — SOCKS5-туннель по SSH до любой машины,
+где Telegram доступен. Чтобы туннель не зависел от открытого окна SSH и
+переживал перезагрузки, оформите его systemd-сервисом на VPS.
+Сначала вход на зарубежную машину по ключу (без пароля):
 
 ```bash
-ssh -N -D 172.17.0.1:1080 user@foreign-server
+ssh-keygen -t ed25519
+ssh-copy-id user@foreign-server
 ```
 
-и в `.env` (адрес `172.17.0.1` — это хост VPS, каким его видят контейнеры;
-если у Docker другая подсеть, см. `ip addr show docker0`):
+Затем `/etc/systemd/system/ssh-tunnel.service`:
+
+```ini
+[Unit]
+Description=SSH SOCKS-туннель для доступа к Telegram API
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+ExecStart=/usr/bin/ssh -N -D 172.17.0.1:1080 \
+    -o ServerAliveInterval=30 -o ServerAliveCountMax=3 \
+    -o ExitOnForwardFailure=yes -o StrictHostKeyChecking=accept-new \
+    user@foreign-server
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
+```
+
+```bash
+systemctl daemon-reload && systemctl enable --now ssh-tunnel
+ss -tlnp | grep 1080   # должно быть LISTEN на 172.17.0.1:1080
+```
+
+и в `.env` (адрес `172.17.0.1` — это сам VPS, каким его видят контейнеры):
 
 ```
 TG_PROXY_URL=socks5://172.17.0.1:1080
 ```
+
+Если в логах бота `Couldn't connect to proxy 172.17.0.1:1080 [Errno 111]` —
+на VPS ничего не слушает порт 1080: туннель не запущен (`systemctl status
+ssh-tunnel`) или ssh запущен без адреса привязки (слушает только 127.0.0.1,
+контейнеры его не видят — нужен именно `-D 172.17.0.1:1080`). Бот при этом
+не умирает, а повторяет попытку каждые 15 секунд.
 
 Подойдёт и любой внешний/платный прокси в формате
 `socks5://user:pass@host:port` или `http://host:port`. После правки `.env`:
