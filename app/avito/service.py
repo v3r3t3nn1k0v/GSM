@@ -13,7 +13,7 @@ import logging
 import re
 from contextlib import AsyncExitStack
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 import aiohttp
@@ -55,8 +55,9 @@ def _is_incoming(message: dict[str, Any], owner_user_id: str) -> bool:
     return str(message.get("author_id") or message.get("user_id")) != owner_user_id
 
 
-def _message_id(message: dict[str, Any]) -> int:
-    return int(message["id"])
+def _message_id(message: dict[str, Any]) -> str:
+    # У Авито id сообщений — hex-строки, не числа
+    return str(message["id"])
 
 
 def _message_text(message: dict[str, Any]) -> str:
@@ -65,15 +66,55 @@ def _message_text(message: dict[str, Any]) -> str:
 
 def _message_time(message: dict[str, Any]) -> datetime | None:
     raw = message.get("created_at")
-    if not raw:
+    if raw is None:
         return None
     try:
+        if isinstance(raw, (int, float)):  # эпоха в секундах/миллисекундах
+            seconds = raw / 1000 if raw > 1e11 else raw
+            return datetime.fromtimestamp(seconds, tz=timezone.utc)
         parsed = datetime.fromisoformat(str(raw).replace("Z", "+00:00"))
-    except ValueError:
+    except (ValueError, OSError, OverflowError):
         return None
     if parsed.tzinfo is None:
         parsed = parsed.replace(tzinfo=timezone.utc)
     return parsed
+
+
+_MIN_TIME = datetime.min.replace(tzinfo=timezone.utc)
+
+
+def _sort_key(message: dict[str, Any]) -> datetime:
+    """Порядок сообщений — по времени (как их ни отдал бы API)."""
+    return _message_time(message) or _MIN_TIME
+
+
+def _select_after(
+    messages: list[dict[str, Any]],
+    cursor_id: str | None,
+    floor: datetime | None,
+) -> list[dict[str, Any]]:
+    """Сообщения после курсора.
+
+    Курсор — id последнего обработанного сообщения. Если его нет в выдаче
+    (длинная история/пагинация) — страховка от дубликатов по времени: только
+    сообщения новее `floor` (последнее касание заявки минус минута).
+    """
+    if cursor_id is None:
+        return messages
+    for index, message in enumerate(messages):
+        if _message_id(message) == cursor_id:
+            return messages[index + 1 :]
+    if floor is None:
+        return messages
+    return [
+        m
+        for m in messages
+        if (time := _message_time(m)) is not None and time > floor
+    ]
+
+
+def _as_utc(dt: datetime) -> datetime:
+    return dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
 
 
 def _chat_title(chat: dict[str, Any]) -> str | None:
@@ -189,13 +230,22 @@ async def _process_chat(ctx: _PollContext, chat: dict[str, Any]) -> str:
     """Обрабатываем один чат. Возвращает 'new_leads' / 'followups' / ''."""
     chat_id = str(chat.get("id"))
     messages = sorted(
-        await ctx.client.fetch_chat_messages(ctx.http, chat_id), key=_message_id
+        await ctx.client.fetch_chat_messages(ctx.http, chat_id), key=_sort_key
     )
     incoming = [
         m for m in messages if _is_incoming(m, ctx.client.user_id) and _message_text(m)
     ]
     if not incoming:
         return ""
+    # Калибровка формата на живых данных: если текст ни у одного сообщения
+    # не распознан — ругаемся в лог с ключами, чтобы поправить парсер
+    if not any(_message_text(m) for m in messages):
+        logger.warning(
+            "Чат Авито %s: %s сообщений без распознанного текста, keys=%s",
+            chat_id,
+            len(messages),
+            sorted(messages[-1].keys()) if messages else [],
+        )
 
     async with ctx.pool() as session:
         service = ApplicationService(session)
@@ -205,9 +255,7 @@ async def _process_chat(ctx: _PollContext, chat: dict[str, Any]) -> str:
             await _create_lead(ctx, session, service, chat, messages, incoming[0])
             return "new_leads"
 
-        return await _process_followup(
-            ctx, session, application, chat, messages, incoming
-        )
+        return await _process_followup(ctx, session, application, chat, messages)
 
 
 async def _create_lead(
@@ -268,8 +316,19 @@ async def _process_followup(
 ) -> str:
     """Переписка по существующей заявке: курсор, AI-ответ, уведомление менеджерам."""
     chat_id = str(chat.get("id"))
-    cursor = int(application.avito_last_message_id or 0)
-    fresh = [m for m in incoming if _message_id(m) > cursor]
+    floor = (
+        _as_utc(application.updated_at) - timedelta(minutes=1)
+        if application.updated_at
+        else None
+    )
+    new_messages = _select_after(
+        messages, application.avito_last_message_id, floor
+    )
+    fresh = [
+        m
+        for m in new_messages
+        if _is_incoming(m, ctx.client.user_id) and _message_text(m)
+    ]
     if not fresh:
         return ""
 

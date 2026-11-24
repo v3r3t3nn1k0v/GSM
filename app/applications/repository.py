@@ -43,7 +43,7 @@ class ApplicationRepository:
         self,
         *,
         chat_id: str,
-        last_message_id: int,
+        last_message_id: str,
         listing_title: str | None,
         full_name: str | None,
         phone: str | None,

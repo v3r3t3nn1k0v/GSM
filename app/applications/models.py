@@ -1,7 +1,7 @@
 import enum
 from datetime import datetime
 
-from sqlalchemy import BigInteger, DateTime, Enum, ForeignKey, Integer, String, Text, func
+from sqlalchemy import DateTime, Enum, ForeignKey, Integer, String, Text, func
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.db.base import Base
@@ -49,7 +49,8 @@ class Application(Base):
     )
     # Привязка чата Авито: один чат по объявлению = одна заявка
     avito_chat_id: Mapped[str | None] = mapped_column(String(64), unique=True)
-    avito_last_message_id: Mapped[str | None] = mapped_column(BigInteger)
+    # У Авито id сообщений — hex-строки вида 5b3bbd1985787232e3179487ece13e9a
+    avito_last_message_id: Mapped[str | None] = mapped_column(String(64))
     listing_title: Mapped[str | None] = mapped_column(String(255))
     status: Mapped[ApplicationStatus] = mapped_column(
         Enum(ApplicationStatus, native_enum=False, length=20),
