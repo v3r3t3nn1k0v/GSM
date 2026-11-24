@@ -36,10 +36,11 @@ logger = logging.getLogger(__name__)
 # Телефон, оставленный прямо в тексте сообщения (7+ цифр)
 PHONE_IN_TEXT_RE = re.compile(r"\+?\d[\d\s\-()]{6,19}\d")
 
-# Ограничители AI-ассистента: не спорим с менеджером, не зацикливаемся
-AI_REPLY_COOLDOWN_SECONDS = 120   # не чаще ответа раз в 2 минуты
+# Экономия лимитов Groq (free-тариф, 8000 токенов/мин): модель дёргаем
+# одним вызовом и только при новых сообщениях; ответ клиенту — шаблоном
 AI_REPLY_MAX_PER_CHAT = 15        # максимум наших ответов в одном чате
-AI_HISTORY_LIMIT = 12             # сколько последних сообщений уходит в контекст
+AI_HISTORY_LIMIT = 8              # сообщений в контексте extraction
+AI_MESSAGE_TEXT_LIMIT = 300       # обрезаем реплики для экономии токенов
 
 # Квалификация лида: менеджерам заявка падает, только когда собраны
 # телефон + вид топлива + объём + регион (до этого бот общается сам)
@@ -299,7 +300,7 @@ async def _create_lead(
         full_name=_buyer_name(chat, ctx.client.user_id),
         phone=extract_phone(message_text),
     )
-    await _qualify_step(ctx, session, application, chat, messages)
+    await _qualify_step(ctx, session, application, chat, messages, extract=True)
     if _lead_is_ready(application):
         await _complete_lead(ctx, application, message_text)
         return "new_leads"
@@ -318,7 +319,7 @@ async def _process_followup(
     chat: dict[str, Any],
     messages: list[dict[str, Any]],
 ) -> str:
-    """Переписка: двигаем курсор, AI квалифицирует, менеджерам — по готовности."""
+    """Переписка: двигаем курсор, извлекаем данные, менеджерам — по готовности."""
     chat_id = str(chat.get("id"))
     floor = (
         _as_utc(application.updated_at) - timedelta(minutes=1)
@@ -347,9 +348,12 @@ async def _process_followup(
                     if phone:
                         application.phone = phone
                         break
-        # Инвариант: ни одно входящее не остаётся без ответа — в т.ч.
-        # повторяем просьбу данных, если прошлый ответ не отправился
-        answered = await _qualify_step(ctx, session, application, chat, messages)
+        # Извлекаем данные только при новых сообщениях — на пустых тиках
+        # Groq не дёргаем (иначе лимит токенов выбивался на 50 чатах × 30 сек)
+        # Инвариант «ответить на висящее входящее» работает и без extraction
+        answered = await _qualify_step(
+            ctx, session, application, chat, messages, extract=bool(fresh)
+        )
         if _lead_is_ready(application):
             await _complete_lead(ctx, application, _message_text(fresh[-1]) if fresh else "")
             return "new_leads"
@@ -383,14 +387,9 @@ async def _process_followup(
     if not fresh:
         return ""
 
-    # Заполненная/обработанная заявка: менеджеры видят каждое новое сообщение
+    # Заполненная/обработанная заявка: менеджеры видят каждое новое сообщение,
+    # дальше общается человек (AI-переписка отключена)
     returned = application.status == ApplicationStatus.processed
-    ai_reply = None
-    if ctx.ai and not returned:
-        ai_reply = await _maybe_ai_reply(ctx, chat, messages)
-        if ai_reply:
-            logger.info("AI-ответ по заявке №%s (чат %s)", application.id, chat_id)
-
     await _notify_managers(
         ctx.bot,
         ctx.settings,
@@ -398,7 +397,6 @@ async def _process_followup(
             application_id=application.id,
             messages=[_message_text(m) for m in fresh],
             returned=returned,
-            ai_reply=ai_reply,
         ),
         # Кнопка нужна, только если заявка ещё не обработана
         keyboard=processed_keyboard(application.id) if not returned else None,
@@ -424,16 +422,21 @@ async def _qualify_step(
     application: Application,
     chat: dict[str, Any],
     messages: list[dict[str, Any]],
+    *,
+    extract: bool,
 ) -> bool:
-    """Извлекаем данные и отвечаем клиенту. True — отправили сообщение.
+    """Шаг квалификации. True — отправили клиенту сообщение.
 
-    Ответ отправляется, только если последнее сообщение чата — от клиента
-    (наши ответы и реплики менеджеров его закрывают). AI недоступен —
-    просим недостающие данные шаблоном, заявка без ответа не зависнет.
+    Нейронка (один дешёвый вызов, только при новых сообщениях) извлекает
+    данные заявки; если всё собрано — `_lead_is_ready` и пересыл менеджерам.
+    Клиенту отвечает только шаблон: AI-переписка отключена ради лимитов Groq.
+    Ответ уходит, только если последнее сообщение чата — от клиента
+    (наши ответы и реплики менеджеров его закрывают).
     """
     chat_id = str(chat.get("id"))
-    extracted = await _extract_lead_data(ctx, messages) if ctx.ai else {}
-    _apply_extracted(application, extracted)
+    if extract:
+        extracted = await _extract_lead_data(ctx, messages) if ctx.ai else {}
+        _apply_extracted(application, extracted)
 
     if not _needs_answer(messages, ctx.client.user_id):
         await session.commit()
@@ -442,11 +445,10 @@ async def _qualify_step(
         await session.commit()
         return False  # лимит исчерпан — дальше эскалация менеджерам
 
-    reply = await generate_ai_reply(ctx, chat, messages) if ctx.ai else None
-    if not reply:
-        reply = texts.ask_missing_text(application)
     try:
-        await ctx.client.send_message(ctx.http, chat_id, reply)
+        await ctx.client.send_message(
+            ctx.http, chat_id, texts.ask_missing_text(application)
+        )
         return True
     except AvitoApiError:
         logger.warning(
@@ -529,7 +531,7 @@ async def _extract_lead_data(
     dialogue = [
         {
             "role": "user" if _is_incoming(m, ctx.client.user_id) else "assistant",
-            "content": _message_text(m),
+            "content": _message_text(m)[:AI_MESSAGE_TEXT_LIMIT],
         }
         for m in messages[-AI_HISTORY_LIMIT:]
         if _message_text(m)
@@ -540,15 +542,11 @@ async def _extract_lead_data(
         {
             "role": "system",
             "content": (
-                "Из переписки с клиентом (Авито, оптовые продажи топлива) извлеки "
-                "данные для заявки. Верни СТРОГО JSON без пояснений и Markdown: "
-                '{"fuel_type": "", "monthly_volume": "", "region": "", "phone": ""}. '
-                "Пустая строка — если данных нет. fuel_type приведи к «АИ» или «ДТ». "
-                "monthly_volume — объём дословно так, как его написал клиент "
-                "(например «литров 5 в месяц»): не пересчитывай и не добавляй "
-                "единицы измерения. "
-                "region — регион, край или город. "
-                "phone — только номер телефона цифрами."
+                "Извлеки из переписки данные для заявки на топливо. Ответ — СТРОГО "
+                "JSON: {\"fuel_type\":\"\",\"monthly_volume\":\"\",\"region\":\"\","
+                "\"phone\":\"\"}. Пустая строка — данных нет. fuel_type → «АИ» или "
+                "«ДТ». monthly_volume — дословно как написал клиент. phone — номер "
+                "телефона цифрами."
             ),
         },
         *dialogue,
@@ -566,66 +564,6 @@ def _apply_extracted(application: Application, data: dict[str, str]) -> None:
     for field, value in data.items():
         if value and not getattr(application, field):
             setattr(application, field, value)
-
-
-def _ai_reply_allowed(messages: list[dict[str, Any]], owner_user_id: str, now: datetime) -> bool:
-    """Предохранители AI: cooldown (не мешаем свежему ответу) и лимит на чат."""
-    outgoing = _outgoing(messages, owner_user_id)
-    if len(outgoing) >= AI_REPLY_MAX_PER_CHAT:
-        return False
-    times = [t for t in (_message_time(m) for m in outgoing) if t is not None]
-    if times:
-        last_reply = max(times)
-        if (now - last_reply).total_seconds() < AI_REPLY_COOLDOWN_SECONDS:
-            return False
-    return True
-
-
-async def _maybe_ai_reply(
-    ctx: _PollContext, chat: dict[str, Any], messages: list[dict[str, Any]]
-) -> str | None:
-    """AI-ответ, если разрешают предохранители; молчание — тоже нормальный итог."""
-    now = datetime.now(timezone.utc)
-    if not _ai_reply_allowed(messages, ctx.client.user_id, now):
-        return None
-    reply = await generate_ai_reply(ctx, chat, messages)
-    if not reply:
-        return None
-    try:
-        await ctx.client.send_message(ctx.http, str(chat.get("id")), reply)
-    except AvitoApiError:
-        logger.warning("AI-ответ в чат %s не доставлен", chat.get("id"))
-        return None
-    return reply
-
-
-async def generate_ai_reply(
-    ctx: _PollContext, chat: dict[str, Any], messages: list[dict[str, Any]]
-) -> str | None:
-    """Ответ ассистента Groq по контексту переписки (None — любой сбой)."""
-    history = _build_ai_messages(messages, ctx.client.user_id, _chat_title(chat))
-    if not history:
-        return None
-    return await ai_client.chat_completion(ctx.ai, ctx.settings, history)
-
-
-def _build_ai_messages(
-    messages: list[dict[str, Any]], owner_user_id: str, listing_title: str | None
-) -> list[dict[str, str]]:
-    """Переписка чата → формат Groq (входящие = user, наши = assistant)."""
-    dialogue: list[dict[str, str]] = []
-    for message in messages[-AI_HISTORY_LIMIT:]:
-        text = _message_text(message)
-        if not text:
-            continue
-        role = "user" if _is_incoming(message, owner_user_id) else "assistant"
-        dialogue.append({"role": role, "content": text})
-    if not dialogue:
-        return []
-    system = texts.AI_SYSTEM_PROMPT
-    if listing_title:
-        system += f"\n\nОбъявление, по которому обратился клиент: «{listing_title}»."
-    return [{"role": "system", "content": system}, *dialogue]
 
 
 async def _notify_managers(

@@ -126,7 +126,7 @@ def escalation_text(
 
 
 def followup_text(
-    *, application_id: int, messages: list[str], returned: bool, ai_reply: str | None = None
+    *, application_id: int, messages: list[str], returned: bool
 ) -> str:
     """Новые сообщения клиента по уже существующей заявке."""
     header = (
@@ -135,7 +135,4 @@ def followup_text(
         else f"💬 <b>Новое сообщение по заявке №{application_id}</b>"
     )
     quoted = "\n".join(f"«{html.escape(text[:1000])}»" for text in messages)
-    footer = ""
-    if ai_reply:
-        footer = f"\n\n🤖 AI-ассистент ответил: «{html.escape(ai_reply[:500])}»"
-    return f"{header}\n\n{quoted}{footer}"
+    return f"{header}\n\n{quoted}"
