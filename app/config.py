@@ -39,9 +39,10 @@ class Settings(BaseSettings):
     # Ключ: console.groq.com → API Keys. Если api.groq.com недоступен с VPS —
     # укажите прокси в GROQ_PROXY_URL (тот же формат, что TG_PROXY_URL).
     groq_api_key: str = ""
-    # Список актуальных моделей: GET https://api.groq.com/openai/v1/models
-    # (llama-3.3-70b-versatile снята с производства — даёт model_not_found)
-    groq_model: str = "openai/gpt-oss-120b"
+    # Список актуальных моделей: GET https://api.groq.com/openai/v1/models.
+    # gpt-oss-120b прожорлива (reasoning) и выбивала free-лимит 8000 TPM;
+    # 20b достаточно для извлечения полей заявки
+    groq_model: str = "openai/gpt-oss-20b"
     groq_proxy_url: str = ""
 
     @field_validator("admin_ids", mode="before")

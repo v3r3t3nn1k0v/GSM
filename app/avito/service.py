@@ -42,11 +42,10 @@ AI_REPLY_MAX_PER_CHAT = 15        # максимум наших ответов �
 AI_HISTORY_LIMIT = 8              # сообщений в контексте extraction
 AI_MESSAGE_TEXT_LIMIT = 300       # обрезаем реплики для экономии токенов
 
-# Квалификация лида: менеджерам заявка падает, только когда собраны
-# телефон + вид топлива + объём + регион (до этого бот общается сам)
+# Квалификация лида: менеджерам заявка падает РОВНО ОДИН РАЗ — когда
+# собраны телефон + вид топлива + объём + регион. До и после — только
+# шаблонные ответы клиенту, переписка в TG не дублируется
 LEAD_REQUIRED_FIELDS = ("fuel_type", "monthly_volume", "region", "phone")
-# Клиент столько написал, а данных всё нет — поднимаем менеджеров несмотря ни на что
-LEAD_ESCALATION_AFTER_MESSAGES = 10
 
 
 def normalize_phone(raw: str | None) -> str | None:
@@ -273,7 +272,7 @@ async def _process_chat(ctx: _PollContext, chat: dict[str, Any]) -> str:
         application = await service.get_by_avito_chat_id(chat_id)
 
         if application is None:
-            await _create_lead(ctx, session, service, chat, messages, incoming[0])
+            await _create_lead(ctx, session, service, chat, messages, incoming)
             return "new_leads"
 
         return await _process_followup(ctx, session, application, chat, messages)
@@ -285,29 +284,36 @@ async def _create_lead(
     service: ApplicationService,
     chat: dict[str, Any],
     messages: list[dict[str, Any]],
-    first_message: dict[str, Any],
+    incoming: list[dict[str, Any]],
 ) -> str:
     """Первый контакт: тихий лид (partly_filled) + просьба данных + извлечение.
 
-    Менеджерам заявка упадёт только когда будут собраны все обязательные поля
-    (телефон, топливо, объём, регион) — до этого бот квалифицирует клиента сам.
+    Менеджерам заявка упадёт РОВНО ОДИН РАЗ — когда собраны все обязательные
+    поля (телефон, топливо, объём, регион). Курсор ставим на последнее
+    сообщение чата: предыстория (старые чаты при онбординге) не считается
+    новой и не пересылается.
     """
-    message_text = _message_text(first_message)
+    chat_id = str(chat.get("id"))
+    last_text = _message_text(incoming[-1])
+    phone = next(
+        (extract_phone(_message_text(m)) for m in incoming if extract_phone(_message_text(m))),
+        None,
+    )
     application = await service.create_avito_lead(
-        chat_id=str(chat.get("id")),
-        last_message_id=_message_id(first_message),
+        chat_id=chat_id,
+        last_message_id=_message_id(messages[-1]),
         listing_title=_chat_title(chat),
         full_name=_buyer_name(chat, ctx.client.user_id),
-        phone=extract_phone(message_text),
+        phone=phone,
     )
     await _qualify_step(ctx, session, application, chat, messages, extract=True)
     if _lead_is_ready(application):
-        await _complete_lead(ctx, application, message_text)
+        await _complete_lead(ctx, application, last_text)
         return "new_leads"
     logger.info(
         "Квалификация лида с Авито: заявка №%s ждёт данные (чат %s)",
         application.id,
-        chat.get("id"),
+        chat_id,
     )
     return "qualifying"
 
@@ -319,8 +325,7 @@ async def _process_followup(
     chat: dict[str, Any],
     messages: list[dict[str, Any]],
 ) -> str:
-    """Переписка: двигаем курсор, извлекаем данные, менеджерам — по готовности."""
-    chat_id = str(chat.get("id"))
+    """Переписка по заявке: до пересылки — тихая квалификация, после — тишина."""
     floor = (
         _as_utc(application.updated_at) - timedelta(minutes=1)
         if application.updated_at
@@ -334,10 +339,8 @@ async def _process_followup(
         for m in new_messages
         if _is_incoming(m, ctx.client.user_id) and _message_text(m)
     ]
-    if not fresh and application.status != ApplicationStatus.partly_filled:
-        return ""
 
-    # Заявка ещё собирается: бот допрашивает, менеджеров не дёргаем
+    # Заявка ещё собирается: бот допрашивает шаблоном, менеджеров не дёргаем
     if application.status == ApplicationStatus.partly_filled:
         if fresh:
             application.avito_last_message_id = _message_id(fresh[-1])
@@ -357,51 +360,39 @@ async def _process_followup(
         if _lead_is_ready(application):
             await _complete_lead(ctx, application, _message_text(fresh[-1]) if fresh else "")
             return "new_leads"
-        if fresh:
-            incoming_total = len(
-                [m for m in messages if _is_incoming(m, ctx.client.user_id) and _message_text(m)]
-            )
-            if incoming_total == LEAD_ESCALATION_AFTER_MESSAGES:
-                await _notify_managers(
-                    ctx.bot,
-                    ctx.settings,
-                    texts.escalation_text(
-                        application_id=application.id,
-                        listing_title=application.listing_title,
-                        name=application.full_name,
-                        phone=application.phone,
-                        fuel_type=application.fuel_type,
-                        monthly_volume=application.monthly_volume,
-                        region=application.region,
-                        message=_message_text(fresh[-1]),
-                    ),
-                    keyboard=processed_keyboard(application.id),
-                )
-                logger.info(
-                    "Эскалация по заявке №%s: %s сообщений без полных данных",
-                    application.id,
-                    incoming_total,
-                )
         return "qualifying" if (fresh or answered) else ""
 
+    # Заявка уже переслана менеджерам (или обработана): в TG — тишина,
+    # но на новое сообщение клиента отвечаем шаблоном (что заполнить /
+    # «спасибо, менеджер свяжется»), чтобы клиент не висел без ответа
     if not fresh:
         return ""
-
-    # Заполненная/обработанная заявка: менеджеры видят каждое новое сообщение,
-    # дальше общается человек (AI-переписка отключена)
-    returned = application.status == ApplicationStatus.processed
-    await _notify_managers(
-        ctx.bot,
-        ctx.settings,
-        texts.followup_text(
-            application_id=application.id,
-            messages=[_message_text(m) for m in fresh],
-            returned=returned,
-        ),
-        # Кнопка нужна, только если заявка ещё не обработана
-        keyboard=processed_keyboard(application.id) if not returned else None,
+    application.avito_last_message_id = _message_id(fresh[-1])
+    if not application.phone:
+        for message in fresh:
+            phone = extract_phone(_message_text(message))
+            if phone:
+                application.phone = phone
+                break
+    await session.commit()
+    if _needs_answer(messages, ctx.client.user_id) and len(
+        _outgoing(messages, ctx.client.user_id)
+    ) < AI_REPLY_MAX_PER_CHAT:
+        try:
+            await ctx.client.send_message(
+                ctx.http, str(chat.get("id")), texts.ask_missing_text(application)
+            )
+        except AvitoApiError:
+            logger.warning(
+                "Чат %s: шаблонный ответ не отправлен, повторим в следующий тик",
+                chat.get("id"),
+            )
+    logger.info(
+        "Чат %s: новые сообщения по заявке №%s — менеджеры не дёргаем",
+        chat.get("id"),
+        application.id,
     )
-    return "followups"
+    return ""
 
 
 def _outgoing(messages: list[dict[str, Any]], owner_user_id: str) -> list[dict[str, Any]]:
