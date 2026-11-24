@@ -17,7 +17,9 @@ BASE_URL = "https://api.avito.ru"
 TOKEN_URL = f"{BASE_URL}/token"
 CHATS_URL = f"{BASE_URL}/messenger/v2/accounts/{{user_id}}/chats"
 CHAT_MESSAGES_URL = f"{BASE_URL}/messenger/v3/accounts/{{user_id}}/chats/{{chat_id}}/messages/"
-SEND_MESSAGE_URL = f"{BASE_URL}/messenger/v1/accounts/{{user_id}}/chats/{{chat_id}}/messages/send"
+# Проверено живым запросом: POST .../messages (БЕЗ /send) отдаёт 200;
+# вариант с суффиксом /send даёт 400 validation error
+SEND_MESSAGE_URL = f"{BASE_URL}/messenger/v1/accounts/{{user_id}}/chats/{{chat_id}}/messages"
 
 # Токен обновляем за 5 минут до истечения
 _TOKEN_REFRESH_MARGIN = 300

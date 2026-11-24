@@ -85,7 +85,9 @@ def _message_text(message: dict[str, Any]) -> str:
 
 
 def _message_time(message: dict[str, Any]) -> datetime | None:
-    raw = message.get("created_at")
+    """Время сообщения. У Авито это поле «created» (epoch-секунды) —
+    проверено живым ответом API; оставляем «created_at» как запасной вариант."""
+    raw = message.get("created", message.get("created_at"))
     if raw is None:
         return None
     try:
@@ -272,8 +274,7 @@ async def _process_chat(ctx: _PollContext, chat: dict[str, Any]) -> str:
         application = await service.get_by_avito_chat_id(chat_id)
 
         if application is None:
-            await _create_lead(ctx, session, service, chat, messages, incoming)
-            return "new_leads"
+            return await _create_lead(ctx, session, service, chat, messages, incoming)
 
         return await _process_followup(ctx, session, application, chat, messages)
 
@@ -382,10 +383,11 @@ async def _process_followup(
             await ctx.client.send_message(
                 ctx.http, str(chat.get("id")), texts.ask_missing_text(application)
             )
-        except AvitoApiError:
+        except AvitoApiError as exc:
             logger.warning(
-                "Чат %s: шаблонный ответ не отправлен, повторим в следующий тик",
+                "Чат %s: шаблонный ответ не отправлен (%s), повторим в следующий тик",
                 chat.get("id"),
+                exc,
             )
     logger.info(
         "Чат %s: новые сообщения по заявке №%s — менеджеры не дёргаем",
@@ -441,11 +443,12 @@ async def _qualify_step(
             ctx.http, chat_id, texts.ask_missing_text(application)
         )
         return True
-    except AvitoApiError:
+    except AvitoApiError as exc:
         logger.warning(
-            "Заявка №%s: ответ в чат %s не отправлен, повторим в следующий тик",
+            "Заявка №%s: ответ в чат %s не отправлен (%s), повторим в следующий тик",
             application.id,
             chat_id,
+            exc,
         )
         return False
     finally:
