@@ -48,10 +48,23 @@ LEAD_REQUIRED_FIELDS = ("fuel_type", "monthly_volume", "region", "phone")
 LEAD_ESCALATION_AFTER_MESSAGES = 10
 
 
+def normalize_phone(raw: str | None) -> str | None:
+    """Номер «8 921…» / «+7 921…» / «7921…» → «+7921…»; остальное не трогаем.
+
+    Однозначно российский формат (11 цифр с 8 или 7 в начале) приводим к виду,
+    который Telegram делает кликабельным. Короткие и иностранные номера
+    оставляем ровно в тех цифрах, что написал клиент, — не угадываем код страны.
+    """
+    digits = re.sub(r"\D", "", raw or "")
+    if len(digits) == 11 and digits[0] in "78":
+        return "+7" + digits[1:]
+    return digits or None
+
+
 def extract_phone(text: str) -> str | None:
     match = PHONE_IN_TEXT_RE.search(text)
     if match and len(re.sub(r"\D", "", match.group(0))) >= 7:
-        return match.group(0)
+        return normalize_phone(match.group(0))
     return None
 
 
@@ -499,14 +512,11 @@ def _parse_extraction(reply: str | None) -> dict[str, str]:
         return {}
     if not isinstance(data, dict):
         return {}
-    phone = str(data.get("phone") or "").strip()
-    if phone and not extract_phone(phone):
-        phone = ""
     return {
         "fuel_type": _normalize_fuel(str(data.get("fuel_type") or "")),
         "monthly_volume": str(data.get("monthly_volume") or "").strip()[:200],
         "region": str(data.get("region") or "").strip()[:200],
-        "phone": extract_phone(phone) or "" if phone else "",
+        "phone": extract_phone(str(data.get("phone") or "")) or "",
     }
 
 
@@ -534,14 +544,19 @@ async def _extract_lead_data(
                 "данные для заявки. Верни СТРОГО JSON без пояснений и Markdown: "
                 '{"fuel_type": "", "monthly_volume": "", "region": "", "phone": ""}. '
                 "Пустая строка — если данных нет. fuel_type приведи к «АИ» или «ДТ». "
-                "monthly_volume — как написал клиент (например «10 000 л/мес»). "
-                "phone — только номер телефона."
+                "monthly_volume — объём дословно так, как его написал клиент "
+                "(например «литров 5 в месяц»): не пересчитывай и не добавляй "
+                "единицы измерения. "
+                "region — регион, край или город. "
+                "phone — только номер телефона цифрами."
             ),
         },
         *dialogue,
     ]
+    # Лимит не занижаем: reasoning-модели тратят часть бюджета на размышление
+    # в отдельном канале, и при 120 токенах ответ приходил пустым
     reply = await ai_client.chat_completion(
-        ctx.ai, ctx.settings, prompt, max_tokens=120, temperature=0.0
+        ctx.ai, ctx.settings, prompt, temperature=0.0
     )
     return _parse_extraction(reply)
 
@@ -591,9 +606,7 @@ async def generate_ai_reply(
     history = _build_ai_messages(messages, ctx.client.user_id, _chat_title(chat))
     if not history:
         return None
-    return await ai_client.chat_completion(
-        ctx.ai, ctx.settings, history, max_tokens=200
-    )
+    return await ai_client.chat_completion(ctx.ai, ctx.settings, history)
 
 
 def _build_ai_messages(

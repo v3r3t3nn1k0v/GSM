@@ -32,7 +32,7 @@ docker compose up --build
 | `AVITO_CLIENT_ID` / `AVITO_CLIENT_SECRET` | ключи приложения с developers.avito.ru (Messenger API). Пусто — интеграция с Авито выключена |
 | `AVITO_USER_ID` | номер профиля Авито (из ссылки на профиль) |
 | `GROQ_API_KEY` | ключ Groq (console.groq.com): AI-ассистент живыми ответами общается с клиентами Авито. Пусто — шаблонные автоответы |
-| `GROQ_MODEL` | модель Groq (по умолчанию `llama-3.3-70b-versatile`) |
+| `GROQ_MODEL` | модель Groq (по умолчанию `openai/gpt-oss-120b`; список актуальных — `GET https://api.groq.com/openai/v1/models`) |
 | `GROQ_PROXY_URL` | прокси для api.groq.com, если он недоступен с VPS (формат как `TG_PROXY_URL`) |
 
 ## VPS не видит Telegram: `TelegramNetworkError: Request timeout error`

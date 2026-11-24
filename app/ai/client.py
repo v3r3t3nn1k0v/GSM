@@ -37,10 +37,15 @@ async def chat_completion(
     settings: Settings,
     messages: list[dict[str, str]],
     *,
-    max_tokens: int = 200,
+    max_tokens: int = 600,
     temperature: float = 0.3,
 ) -> str | None:
-    """Ответ модели или None при любой проблеме (не бросает исключений)."""
+    """Ответ модели или None при любой проблеме (не бросает исключений).
+
+    max_tokens по умолчанию 600: reasoning-модели (gpt-oss) тратят заметную
+    часть бюджета на рассуждение в отдельном канале — при малом лимите
+    ответ обрезается до пустой строки (finish_reason=length).
+    """
     if not settings.groq_api_key:
         return None
     try:
@@ -59,7 +64,19 @@ async def chat_completion(
                 )
                 return None
             payload: dict[str, Any] = await response.json()
-        return str(payload["choices"][0]["message"]["content"]).strip() or None
+        choice = payload["choices"][0]
+        content = str(choice["message"].get("content") or "").strip()
+        if not content:
+            # Пустой content при finish_reason=length — бюджет токенов ушёл на reasoning
+            logger.warning(
+                "Groq: пустой ответ модели %s (finish_reason=%s, tokens=%s) — "
+                "попробуйте увеличить max_tokens или сменить GROQ_MODEL",
+                settings.groq_model,
+                choice.get("finish_reason"),
+                (payload.get("usage") or {}).get("completion_tokens"),
+            )
+            return None
+        return content
     except (aiohttp.ClientError, asyncio.TimeoutError, KeyError, IndexError):
         logger.warning("Groq недоступен, откатываемся на шаблонный ответ", exc_info=True)
         return None
