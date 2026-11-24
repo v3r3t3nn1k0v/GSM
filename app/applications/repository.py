@@ -48,10 +48,11 @@ class ApplicationRepository:
         full_name: str | None,
         phone: str | None,
     ) -> Application:
-        """Лид с Авито: сразу ждёт обработки менеджером."""
+        """Лид с Авито: создаётся «тихим» (partly_filled) — бот собирает данные,
+        менеджерам заявка падает только когда она заполнена."""
         application = Application(
             source=ApplicationSource.avito,
-            status=ApplicationStatus.filled,
+            status=ApplicationStatus.partly_filled,
             avito_chat_id=chat_id,
             avito_last_message_id=last_message_id,
             listing_title=listing_title,
