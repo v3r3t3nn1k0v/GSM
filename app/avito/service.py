@@ -1,20 +1,22 @@
 """Поллинг чатов Авито: новые лиды и сообщения по существующим заявкам.
 
-Ключевая идея: один chat_id Авито = одна заявка. Входящее сообщение из чата,
-которого нет в базе, — первый контакт (создаём лид + ответ клиенту + уведомление
-менеджерам). Сообщения из известного чата — переписка по существующей заявке.
+Ключевая идея: один chat_id Авито = одна заявка. Первое сообщение в чате
+создаёт «тихую» заявку; менеджерам она уходит РОВНО ОДИН РАЗ — когда
+собраны телефон, топливо, объём и регион.
 
-Отвечает клиентам AI-ассистент на Groq (если задан GROQ_API_KEY): живые
-контекстные ответы с жёстким промптом продавца топлива. Любой сбой Groq —
-откат на шаблон (первый контакт) или тишина (переписка), лид не теряется.
+Каждое новое сообщение клиента разбирается через tool calling (Groq):
+модель сама выбирает функции — сохранить данные заявки, ответить на вопрос
+по контексту компании, ответить физлицу или предложить заполнить заявку.
+Любой сбой Groq — откат на шаблон, лид не теряется.
 """
 import asyncio
-import json
 import logging
 import re
 from contextlib import AsyncExitStack
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
+from functools import lru_cache
+from pathlib import Path
 from typing import Any
 
 import aiohttp
@@ -25,7 +27,7 @@ from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 from app.ai import client as ai_client
 from app.applications.models import Application, ApplicationStatus
 from app.applications.service import ApplicationService
-from app.avito import texts
+from app.avito import texts, tools
 from app.avito.client import AvitoApiError, AvitoClient, AvitoSubscriptionError
 from app.config import Settings
 from app.telegram import create_bot
@@ -37,15 +39,31 @@ logger = logging.getLogger(__name__)
 PHONE_IN_TEXT_RE = re.compile(r"\+?\d[\d\s\-()]{6,19}\d")
 
 # Экономия лимитов Groq (free-тариф, 8000 токенов/мин): модель дёргаем
-# одним вызовом и только при новых сообщениях; ответ клиенту — шаблоном
+# только при новых сообщениях клиента
 AI_REPLY_MAX_PER_CHAT = 15        # максимум наших ответов в одном чате
-AI_HISTORY_LIMIT = 8              # сообщений в контексте extraction
+AI_HISTORY_LIMIT = 8              # сколько последних сообщений уходит модели
 AI_MESSAGE_TEXT_LIMIT = 300       # обрезаем реплики для экономии токенов
 
 # Квалификация лида: менеджерам заявка падает РОВНО ОДИН РАЗ — когда
 # собраны телефон + вид топлива + объём + регион. До и после — только
-# шаблонные ответы клиенту, переписка в TG не дублируется
+# ответы клиенту, переписка в TG не дублируется
 LEAD_REQUIRED_FIELDS = ("fuel_type", "monthly_volume", "region", "phone")
+
+# Контекст компании: по нему модель отвечает на вопросы клиентов
+CONTEXT_PATH = Path(__file__).resolve().parents[2] / "assets" / "avito_context.txt"
+
+
+@lru_cache
+def company_context() -> str:
+    """Текст контекста компании (читается один раз на процесс)."""
+    try:
+        return CONTEXT_PATH.read_text(encoding="utf-8").strip()
+    except OSError:
+        logger.error(
+            "Не прочитан контекст компании %s — вопросы клиентов будут уходить менеджеру",
+            CONTEXT_PATH,
+        )
+        return ""
 
 
 def normalize_phone(raw: str | None) -> str | None:
@@ -296,20 +314,20 @@ async def _create_lead(
     """
     chat_id = str(chat.get("id"))
     last_text = _message_text(incoming[-1])
-    phone = next(
-        (extract_phone(_message_text(m)) for m in incoming if extract_phone(_message_text(m))),
-        None,
-    )
     application = await service.create_avito_lead(
         chat_id=chat_id,
         last_message_id=_message_id(messages[-1]),
         listing_title=_chat_title(chat),
         full_name=_buyer_name(chat, ctx.client.user_id),
-        phone=phone,
+        phone=_find_phone(incoming),
     )
-    await _qualify_step(ctx, session, application, chat, messages, extract=True)
+    # Старые чаты при онбординге, где последним ответил менеджер, модель не дёргаем
+    await _qualify_step(
+        ctx, session, application, chat, messages,
+        analyze=_needs_answer(messages, ctx.client.user_id),
+    )
     if _lead_is_ready(application):
-        await _complete_lead(ctx, application, last_text)
+        await _complete_lead(ctx, session, application, last_text)
         return "new_leads"
     logger.info(
         "Квалификация лида с Авито: заявка №%s ждёт данные (чат %s)",
@@ -326,7 +344,7 @@ async def _process_followup(
     chat: dict[str, Any],
     messages: list[dict[str, Any]],
 ) -> str:
-    """Переписка по заявке: до пересылки — тихая квалификация, после — тишина."""
+    """Переписка по заявке: до пересылки менеджерам — квалификация, после — ответы на вопросы."""
     floor = (
         _as_utc(application.updated_at) - timedelta(minutes=1)
         if application.updated_at
@@ -340,61 +358,29 @@ async def _process_followup(
         for m in new_messages
         if _is_incoming(m, ctx.client.user_id) and _message_text(m)
     ]
-
-    # Заявка ещё собирается: бот допрашивает шаблоном, менеджеров не дёргаем
-    if application.status == ApplicationStatus.partly_filled:
-        if fresh:
-            application.avito_last_message_id = _message_id(fresh[-1])
-            # Клиент мог оставить телефон прямо в тексте сообщения
-            if not application.phone:
-                for message in fresh:
-                    phone = extract_phone(_message_text(message))
-                    if phone:
-                        application.phone = phone
-                        break
-        # Извлекаем данные только при новых сообщениях — на пустых тиках
-        # Groq не дёргаем (иначе лимит токенов выбивался на 50 чатах × 30 сек)
-        # Инвариант «ответить на висящее входящее» работает и без extraction
-        answered = await _qualify_step(
-            ctx, session, application, chat, messages, extract=bool(fresh)
-        )
-        if _lead_is_ready(application):
-            await _complete_lead(ctx, application, _message_text(fresh[-1]) if fresh else "")
-            return "new_leads"
-        return "qualifying" if (fresh or answered) else ""
-
-    # Заявка уже переслана менеджерам (или обработана): в TG — тишина,
-    # но на новое сообщение клиента отвечаем шаблоном (что заполнить /
-    # «спасибо, менеджер свяжется»), чтобы клиент не висел без ответа
-    if not fresh:
+    # Нового нет, и последнее сообщение в чате — наше: нечего делать
+    needs_answer = _needs_answer(messages, ctx.client.user_id)
+    if not fresh and not needs_answer:
         return ""
-    application.avito_last_message_id = _message_id(fresh[-1])
-    if not application.phone:
-        for message in fresh:
-            phone = extract_phone(_message_text(message))
-            if phone:
-                application.phone = phone
-                break
-    await session.commit()
-    if _needs_answer(messages, ctx.client.user_id) and len(
-        _outgoing(messages, ctx.client.user_id)
-    ) < AI_REPLY_MAX_PER_CHAT:
-        try:
-            await ctx.client.send_message(
-                ctx.http, str(chat.get("id")), texts.ask_missing_text(application)
-            )
-        except AvitoApiError as exc:
-            logger.warning(
-                "Чат %s: шаблонный ответ не отправлен (%s), повторим в следующий тик",
-                chat.get("id"),
-                exc,
-            )
-    logger.info(
-        "Чат %s: новые сообщения по заявке №%s — менеджеры не дёргаем",
-        chat.get("id"),
-        application.id,
+    if fresh:
+        application.avito_last_message_id = _message_id(fresh[-1])
+        # Клиент мог оставить телефон прямо в тексте сообщения
+        if not application.phone:
+            application.phone = _find_phone(fresh)
+
+    qualifying = application.status == ApplicationStatus.partly_filled
+    # Модель дёргаем, только когда новое сообщение осталось без ответа менеджера
+    # (на каждом тике по всем чатам выбивался лимит токенов Groq)
+    answered = await _qualify_step(
+        ctx, session, application, chat, messages,
+        analyze=bool(fresh) and needs_answer, completed=not qualifying,
     )
-    return ""
+    if qualifying and _lead_is_ready(application):
+        await _complete_lead(
+            ctx, session, application, _message_text(fresh[-1]) if fresh else ""
+        )
+        return "new_leads"
+    return "qualifying" if qualifying and (fresh or answered) else ""
 
 
 def _outgoing(messages: list[dict[str, Any]], owner_user_id: str) -> list[dict[str, Any]]:
@@ -416,31 +402,32 @@ async def _qualify_step(
     chat: dict[str, Any],
     messages: list[dict[str, Any]],
     *,
-    extract: bool,
+    analyze: bool,
+    completed: bool = False,
 ) -> bool:
-    """Шаг квалификации. True — отправили клиенту сообщение.
+    """Шаг обработки новых сообщений. True — отправили клиенту сообщение.
 
-    Нейронка (один дешёвый вызов, только при новых сообщениях) извлекает
-    данные заявки; если всё собрано — `_lead_is_ready` и пересыл менеджерам.
-    Клиенту отвечает только шаблон: AI-переписка отключена ради лимитов Groq.
-    Ответ уходит, только если последнее сообщение чата — от клиента
-    (наши ответы и реплики менеджеров его закрывают).
+    Function calling (только при новых сообщениях без ответа менеджера):
+    классификация с данными заявки, а если клиент задал вопрос — ответ по
+    контексту компании. Ответ уходит, только если последнее сообщение чата —
+    от клиента (наши ответы и реплики менеджеров его закрывают). Без новых
+    сообщений остаётся только повтор шаблона, если прошлый ответ не дошёл.
     """
     chat_id = str(chat.get("id"))
-    if extract:
-        extracted = await _extract_lead_data(ctx, messages) if ctx.ai else {}
-        _apply_extracted(application, extracted)
+    result = await _analyze(ctx, messages) if analyze and ctx.ai else None
+    if result is not None:
+        _apply_extracted(application, result.fields)
 
     if not _needs_answer(messages, ctx.client.user_id):
         await session.commit()
         return False
     if len(_outgoing(messages, ctx.client.user_id)) >= AI_REPLY_MAX_PER_CHAT:
         await session.commit()
-        return False  # лимит исчерпан — дальше эскалация менеджерам
+        return False  # лимит исчерпан — дальше работает менеджер
 
     try:
         await ctx.client.send_message(
-            ctx.http, chat_id, texts.ask_missing_text(application)
+            ctx.http, chat_id, _reply_text(result, application, completed=completed)
         )
         return True
     except AvitoApiError as exc:
@@ -456,10 +443,15 @@ async def _qualify_step(
 
 
 async def _complete_lead(
-    ctx: _PollContext, application: Application, last_message: str
+    ctx: _PollContext, session, application: Application, last_message: str
 ) -> None:
-    """Данные собраны: заявка ждёт обработки, менеджерам летит карточка."""
+    """Данные собраны: заявка ждёт обработки, менеджерам летит карточка.
+
+    ВАЖНО: фиксируем статус в БД сразу — без commit заявка оставалась
+    partly_filled и карточка менеджерам улетала на каждом тике.
+    """
     application.status = ApplicationStatus.filled
+    await session.commit()
     await _notify_managers(
         ctx.bot,
         ctx.settings,
@@ -496,66 +488,178 @@ def _normalize_fuel(value: str) -> str:
     return value.strip()[:8]
 
 
-def _parse_extraction(reply: str | None) -> dict[str, str]:
-    """JSON из ответа модели (терпим Markdown-ограды). Пусто при любом сбое."""
-    if not reply:
-        return {}
-    cleaned = reply.strip()
-    cleaned = re.sub(r"^```(?:json)?\s*|\s*```$", "", cleaned).strip()
-    try:
-        data = json.loads(cleaned)
-    except ValueError:
-        return {}
-    if not isinstance(data, dict):
-        return {}
-    return {
-        "fuel_type": _normalize_fuel(str(data.get("fuel_type") or "")),
-        "monthly_volume": str(data.get("monthly_volume") or "").strip()[:200],
-        "region": str(data.get("region") or "").strip()[:200],
-        "phone": extract_phone(str(data.get("phone") or "")) or "",
-    }
+@dataclass
+class _Analysis:
+    """Итог разбора нового сообщения клиента (function calling)."""
+
+    fields: dict[str, str]          # данные заявки из утверждений клиента
+    has_question: bool = False      # клиент задал вопрос
+    individual: bool = False        # клиент спрашивает про физлицо
+    answer: str | None = None       # ответ на вопрос (None — вопроса не было)
 
 
-async def _extract_lead_data(
-    ctx: _PollContext, messages: list[dict[str, Any]]
-) -> dict[str, str]:
-    """Groq читает переписку и возвращает поля заявки. Сбой — пустой словарь."""
-    if ctx.ai is None:
-        return {}
+async def _analyze(ctx: _PollContext, messages: list[dict[str, Any]]) -> _Analysis | None:
+    """Разбор новых сообщений в два шага. None — сбой Groq (откат на шаблон).
+
+    1) classify_client_message — данные заявки + вопрос/физлицо (без контекста
+    компании, дёшево); 2) answer_from_context — только если клиент задал вопрос.
+    """
+    window = [m for m in messages[-AI_HISTORY_LIMIT:] if _message_text(m)]
     dialogue = [
         {
             "role": "user" if _is_incoming(m, ctx.client.user_id) else "assistant",
             "content": _message_text(m)[:AI_MESSAGE_TEXT_LIMIT],
         }
-        for m in messages[-AI_HISTORY_LIMIT:]
-        if _message_text(m)
+        for m in window
     ]
     if not dialogue:
-        return {}
-    prompt = [
-        {
-            "role": "system",
-            "content": (
-                "Извлеки из переписки данные для заявки на топливо. Ответ — СТРОГО "
-                "JSON: {\"fuel_type\":\"\",\"monthly_volume\":\"\",\"region\":\"\","
-                "\"phone\":\"\"}. Пустая строка — данных нет. fuel_type → «АИ» или "
-                "«ДТ». monthly_volume — дословно как написал клиент. phone — номер "
-                "телефона цифрами."
-            ),
-        },
-        *dialogue,
+        return None
+    statements = [
+        piece
+        for piece in (
+            statements_only(_message_text(m))
+            for m in window
+            if _is_incoming(m, ctx.client.user_id)
+        )
+        if piece
     ]
-    # Лимит не занижаем: reasoning-модели тратят часть бюджета на размышление
-    # в отдельном канале, и при 120 токенах ответ приходил пустым
-    reply = await ai_client.chat_completion(
-        ctx.ai, ctx.settings, prompt, temperature=0.0
+    system = tools.CLASSIFY_SYSTEM.format(statements=" | ".join(statements) or "—")
+    calls = await ai_client.chat_tool_calls(
+        ctx.ai,
+        ctx.settings,
+        [{"role": "system", "content": system}, *dialogue],
+        tools.CLASSIFY_TOOLS,
     )
-    return _parse_extraction(reply)
+    if not calls:
+        return None
+    args = calls[0][1]
+    result = _Analysis(
+        fields=_normalize_fields(args, " ".join(statements)),
+        has_question=args.get("has_question") is True,
+        individual=args.get("is_individual") is True,
+    )
+    if result.has_question and not result.individual:
+        result.answer = await _answer_from_context(ctx, dialogue)
+    return result
+
+
+async def _answer_from_context(
+    ctx: _PollContext, dialogue: list[dict[str, str]]
+) -> str:
+    """Ответ на вопрос по контексту компании; не нашли — к менеджеру."""
+    system = tools.ANSWER_SYSTEM.format(context=company_context())
+    calls = await ai_client.chat_tool_calls(
+        ctx.ai,
+        ctx.settings,
+        [{"role": "system", "content": system}, *dialogue],
+        tools.ANSWER_TOOLS,
+    )
+    if not calls:
+        return texts.NO_ANSWER_TEXT
+    args = calls[0][1]
+    answer = str(args.get("answer") or "").strip()[:1000] if args.get("found") is True else ""
+    # Модель может отправить клиента «позвонить» на его же собственный номер —
+    # фразы с телефонами из ответа убираем, менеджер свяжется сам
+    answer = " ".join(
+        sentence
+        for sentence in re.split(r"(?<=[.!?])\s+", answer)
+        if sentence and not extract_phone(sentence)
+    )
+    return answer or texts.NO_ANSWER_TEXT
+
+
+# Границы фраз внутри предложения и вопросительные слова в начале фразы
+_CLAUSE_DELIMITERS_RE = re.compile(r"[,;]| {2,}|\s+-\s+|\s+(?:а|но|и)\s+", re.IGNORECASE)
+_QUESTION_START_RE = re.compile(
+    r"^(?:сколько|как\w*|где|куда|когда|почему|зачем|что|кто|чь[иёя]|\S+\s+ли\b)",
+    re.IGNORECASE,
+)
+
+
+def statements_only(text: str) -> str:
+    """Сообщение клиента без вопросов — данные заявки берём только из утверждений.
+
+    Маленькая модель принимает упоминание в вопросе («доставляете в Новгород?»)
+    за регион клиента, поэтому вопросительные фразы отрезаем заранее.
+    """
+    kept: list[str] = []
+    for sentence in re.split(r"(?<=[.!?])\s+|[\r\n]+", text):
+        clauses = [c.strip(" ?!.") for c in _CLAUSE_DELIMITERS_RE.split(sentence)]
+        if sentence.rstrip().endswith("?"):
+            clauses = clauses[:-1]  # вопросительная фраза — последняя перед «?»
+        kept.extend(c for c in clauses if c and not _QUESTION_START_RE.match(c))
+    return ", ".join(kept)
+
+
+def _digits(value: str) -> str:
+    return re.sub(r"\D", "", value)
+
+
+def _stem(value: str) -> str:
+    """Начало слова без окончания: «Тверь» и «из Твери» должны совпасть."""
+    return value.lower()[: max(3, min(5, len(value) - 1))]
+
+
+def _normalize_fields(args: dict[str, Any], statements: str) -> dict[str, str]:
+    """Аргументы модели → поля заявки.
+
+    Значение оставляем, только если оно действительно встречается в словах
+    клиента: модель небольшая и может взять регион или объём из вопроса.
+    """
+    volume = str(args.get("monthly_volume") or "").strip()[:200]
+    region = str(args.get("region") or "").strip()[:200]
+    phone = extract_phone(str(args.get("phone") or "")) or ""
+    digits = _digits(statements)
+    if not _digits(volume) or _digits(volume) not in digits:
+        volume = ""
+    if len(region) < 3 or _stem(region) not in statements.lower():
+        region = ""
+    if phone:
+        # Клиент пишет «8 921…», нормализованный номер начинается с «+7» —
+        # сверяем по значимой части без кода страны
+        phone_digits = _digits(phone)
+        if len(phone_digits) == 11 and phone_digits[0] == "7":
+            phone_digits = phone_digits[1:]
+        if phone_digits not in digits:
+            phone = ""
+    return {
+        "fuel_type": _normalize_fuel(str(args.get("fuel_type") or "")),
+        "monthly_volume": volume,
+        "region": region,
+        "phone": phone,
+    }
+
+
+def _find_phone(messages: list[dict[str, Any]]) -> str | None:
+    """Первый телефон, встретившийся в тексте сообщений."""
+    for message in messages:
+        phone = extract_phone(_message_text(message))
+        if phone:
+            return phone
+    return None
+
+
+def _reply_text(
+    result: _Analysis | None, application: Application, *, completed: bool
+) -> str:
+    """Что отправить клиенту по итогам function calling."""
+    if result is not None and result.individual:
+        return texts.INDIVIDUAL_TEXT
+    if completed:
+        # Заявка уже у менеджеров: на вопрос отвечаем, остальное — «менеджер свяжется»
+        tail = texts.MANAGER_CONTACT_TEXT if result and result.answer else texts.THANKS_TEXT
+    else:
+        # Приветствие или сообщение без вопроса — предлагаем заполнить заявку
+        tail = texts.ask_missing_text(application)
+    if result is None or not result.answer:
+        return tail
+    return texts.compose_answer(result.answer, tail)
 
 
 def _apply_extracted(application: Application, data: dict[str, str]) -> None:
-    """Заполняем только пустые поля — слово клиента важнее домыслов модели."""
-    for field, value in data.items():
+    """Заполняем только пустые поля заявки — слово клиента важнее домыслов."""
+    for field in LEAD_REQUIRED_FIELDS:
+        value = data.get(field)
         if value and not getattr(application, field):
             setattr(application, field, value)
 

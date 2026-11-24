@@ -35,13 +35,13 @@ class Settings(BaseSettings):
     avito_client_secret: str = ""
     avito_user_id: str = ""
 
-    # Groq: AI-ассистент для автоответов клиентам Авито (пусто — шаблонные ответы).
-    # Ключ: console.groq.com → API Keys. Если api.groq.com недоступен с VPS —
-    # укажите прокси в GROQ_PROXY_URL (тот же формат, что TG_PROXY_URL).
+    # Groq: разбор сообщений клиентов Авито через tool calling (пусто — шаблонные
+    # ответы). Ключ: console.groq.com → API Keys. Если api.groq.com недоступен
+    # с VPS — укажите прокси в GROQ_PROXY_URL (тот же формат, что TG_PROXY_URL).
     groq_api_key: str = ""
     # Список актуальных моделей: GET https://api.groq.com/openai/v1/models.
     # gpt-oss-120b прожорлива (reasoning) и выбивала free-лимит 8000 TPM;
-    # 20b достаточно для извлечения полей заявки
+    # 20b хватает для tool calling (данные заявки + ответы на вопросы)
     groq_model: str = "openai/gpt-oss-20b"
     groq_proxy_url: str = ""
 
