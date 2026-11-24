@@ -25,6 +25,20 @@ logger = logging.getLogger(__name__)
 RECONNECT_DELAY_SECONDS = 15
 
 
+def setup_logging() -> None:
+    """Конфигурируем логирование.
+
+    Вызывается ДО и ПОСЛЕ миграций: alembic через fileConfig переписывает
+    root-логгер (уровень WARN, хендлеры alembic), и без повторного вызова
+    бот продолжал бы работать молча, без единой строчки в логах.
+    """
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+        force=True,
+    )
+
+
 def run_migrations() -> None:
     """Применяем миграции до старта polling."""
     alembic_cfg = AlembicConfig("alembic.ini")
@@ -54,13 +68,11 @@ async def wait_for_telegram(bot: Bot) -> None:
 
 
 async def main() -> None:
-    logging.basicConfig(
-        level=logging.INFO,
-        format="%(asctime)s %(levelname)s %(name)s: %(message)s",
-    )
+    setup_logging()
     settings = get_settings()
 
     await asyncio.to_thread(run_migrations)
+    setup_logging()  # восстанавливаем логирование, затёртое fileConfig из alembic
 
     session_pool = make_session_pool(settings.database_url)
     storage = RedisStorage.from_url(settings.redis_url)

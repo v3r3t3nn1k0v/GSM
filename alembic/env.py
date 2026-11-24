@@ -15,7 +15,9 @@ from app.users.models import User  # noqa: F401
 config = context.config
 
 if config.config_file_name is not None:
-    fileConfig(config.config_file_name)
+    # disable_existing_loggers=False: не глушим логгеры приложения
+    # (без этого fileConfig молча выключает logging бота после миграций)
+    fileConfig(config.config_file_name, disable_existing_loggers=False)
 
 # URL берём из настроек приложения (.env), а не из alembic.ini
 config.set_main_option("sqlalchemy.url", get_settings().database_url)

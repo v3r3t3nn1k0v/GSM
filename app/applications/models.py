@@ -1,7 +1,7 @@
 import enum
 from datetime import datetime
 
-from sqlalchemy import DateTime, Enum, ForeignKey, Integer, String, Text, func
+from sqlalchemy import BigInteger, DateTime, Enum, ForeignKey, Integer, String, Text, func
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.db.base import Base
@@ -12,6 +12,11 @@ class ApplicationStatus(str, enum.Enum):
     partly_filled = "partly_filled"
     filled = "filled"
     processed = "processed"
+
+
+class ApplicationSource(str, enum.Enum):
+    tg = "tg"        # заявка из Telegram-воронки
+    avito = "avito"  # лид из чата по объявлению на Авито
 
 
 # Поля-ответы анкеты в порядке следования вопросов
@@ -32,9 +37,20 @@ class Application(Base):
     __tablename__ = "applications"
 
     id: Mapped[int] = mapped_column(primary_key=True)
-    user_id: Mapped[int] = mapped_column(
+    # Не заполняется для лидов с Авито (там нет пользователя бота)
+    user_id: Mapped[int | None] = mapped_column(
         ForeignKey("users.id", ondelete="CASCADE"), index=True
     )
+    source: Mapped[ApplicationSource] = mapped_column(
+        Enum(ApplicationSource, native_enum=False, length=8),
+        default=ApplicationSource.tg,
+        server_default=ApplicationSource.tg.value,
+        nullable=False,
+    )
+    # Привязка чата Авито: один чат по объявлению = одна заявка
+    avito_chat_id: Mapped[str | None] = mapped_column(String(64), unique=True)
+    avito_last_message_id: Mapped[str | None] = mapped_column(BigInteger)
+    listing_title: Mapped[str | None] = mapped_column(String(255))
     status: Mapped[ApplicationStatus] = mapped_column(
         Enum(ApplicationStatus, native_enum=False, length=20),
         default=ApplicationStatus.partly_filled,

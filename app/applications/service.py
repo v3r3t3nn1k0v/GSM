@@ -37,6 +37,34 @@ class ApplicationService:
         )
         return application, True
 
+    async def get_by_avito_chat_id(self, chat_id: str) -> Application | None:
+        return await self.repository.get_by_avito_chat_id(chat_id)
+
+    async def create_avito_lead(
+        self,
+        *,
+        chat_id: str,
+        last_message_id: int,
+        listing_title: str | None,
+        full_name: str | None,
+        phone: str | None,
+    ) -> Application:
+        """Лид с Авито: создаём сразу «ждёт обработки» и пишем в журнал."""
+        application = await self.repository.create_avito_lead(
+            chat_id=chat_id,
+            last_message_id=last_message_id,
+            listing_title=listing_title,
+            full_name=full_name,
+            phone=phone,
+        )
+        await self.logs.log(
+            LogEvent.new_application,
+            user_id=None,
+            application_id=application.id,
+            payload={"source": "avito", "chat_id": chat_id, "listing": listing_title},
+        )
+        return application
+
     async def get_open_application(
         self, *, application_id: int, telegram_id: int
     ) -> Application | None:

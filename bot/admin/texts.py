@@ -62,9 +62,14 @@ def applications_page_text(
     lines = [f"📋 <b>Заявки {start}–{end} из {total}</b> ({label})", ""]
     for application in applications:
         status = _STATUS_ICONS.get(application.status, "•")
-        name = html.escape(application.full_name or application.user.nickname or "—")
-        if application.user.username:
-            name += f" (@{application.user.username})"
+        # Лиды с Авито не привязаны к пользователю бота — берём имя из заявки
+        nickname = application.user.nickname if application.user else None
+        username = application.user.username if application.user else None
+        name = html.escape(application.full_name or nickname or "—")
+        if username:
+            name += f" (@{username})"
+        if application.listing_title:
+            name += f" · {html.escape(application.listing_title)}"
         who = name
         details = " · ".join(
             html.escape(part)

@@ -29,6 +29,19 @@ class Settings(BaseSettings):
     reminder_delay_minutes: int = 60
     reminder_max_count: int = 1
 
+    # Авито: официальное Messenger API (пустые значения — интеграция выключена).
+    # Ключи выдаются на developers.avito.ru, user_id — номер профиля Авито.
+    avito_client_id: str = ""
+    avito_client_secret: str = ""
+    avito_user_id: str = ""
+
+    # Groq: AI-ассистент для автоответов клиентам Авито (пусто — шаблонные ответы).
+    # Ключ: console.groq.com → API Keys. Если api.groq.com недоступен с VPS —
+    # укажите прокси в GROQ_PROXY_URL (тот же формат, что TG_PROXY_URL).
+    groq_api_key: str = ""
+    groq_model: str = "llama-3.3-70b-versatile"
+    groq_proxy_url: str = ""
+
     @field_validator("admin_ids", mode="before")
     @classmethod
     def parse_id_list(cls, value: object) -> object:

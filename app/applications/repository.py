@@ -3,7 +3,7 @@ from datetime import datetime
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.applications.models import Application, ApplicationStatus
+from app.applications.models import Application, ApplicationSource, ApplicationStatus
 
 
 class ApplicationRepository:
@@ -34,6 +34,34 @@ class ApplicationRepository:
         await self.session.flush()
         return application
 
+    async def get_by_avito_chat_id(self, chat_id: str) -> Application | None:
+        """Заявка, привязанная к чату Авито (один чат = одна заявка)."""
+        stmt = select(Application).where(Application.avito_chat_id == chat_id)
+        return (await self.session.execute(stmt)).scalar_one_or_none()
+
+    async def create_avito_lead(
+        self,
+        *,
+        chat_id: str,
+        last_message_id: int,
+        listing_title: str | None,
+        full_name: str | None,
+        phone: str | None,
+    ) -> Application:
+        """Лид с Авито: сразу ждёт обработки менеджером."""
+        application = Application(
+            source=ApplicationSource.avito,
+            status=ApplicationStatus.filled,
+            avito_chat_id=chat_id,
+            avito_last_message_id=last_message_id,
+            listing_title=listing_title,
+            full_name=full_name,
+            phone=phone,
+        )
+        self.session.add(application)
+        await self.session.flush()
+        return application
+
     async def stale_partly_filled(
         self,
         *,
@@ -46,6 +74,7 @@ class ApplicationRepository:
             select(Application)
             .where(
                 Application.status == ApplicationStatus.partly_filled,
+                Application.user_id.is_not(None),  # лиды Авито без пользователя
                 Application.reminders_sent < max_reminders,
                 Application.updated_at < before,
             )
