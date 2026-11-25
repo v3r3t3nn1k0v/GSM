@@ -21,6 +21,18 @@ NO_ANSWER_TEXT = (
 # Заявка уже у менеджеров: подпись под ответом на новый вопрос
 MANAGER_CONTACT_TEXT = "Наш менеджер свяжется с Вами в ближайшее время."
 
+# Приветствие клиенту, который ещё ничего не назвал: предложение заполнить заявку
+GREETING_TEXT = (
+    "Добрый день🤝\n"
+    "1️⃣Какой вид топлива Вас интересует ? 🛢\n"
+    "2️⃣Какая сеть АЗС ? ⛽️\n"
+    "3️⃣Какой объём в среднем в месяц ? 💸\n"
+    "4️⃣Какой у вас Регион ? 🚗\n"
+    "\n"
+    "Можете написать свой номер и мы с вами свяжемся 🤝⛽️☎️📞\n"
+    "Обсудим детали и выгодные цены 🤝"
+)
+
 # Что спрашиваем, по каким полям заявки
 _FIELD_LABELS = {
     "fuel_type": "вид топлива",
@@ -30,14 +42,28 @@ _FIELD_LABELS = {
 }
 
 
-def ask_missing_text(application) -> str:
-    """Предложение заполнить заявку: перечисляет ровно те поля,
-    которых ещё не хватает; когда всё собрано — благодарность."""
-    missing = [
+def _missing_labels(application) -> list[str]:
+    return [
         label
         for field, label in _FIELD_LABELS.items()
         if not getattr(application, field, None)
     ]
+
+
+def offer_text(application) -> str:
+    """Предложение заполнить заявку.
+
+    Клиенту, который ещё ничего не назвал, уходит приветствие с вопросами;
+    если часть данных уже есть — перечисляем только недостающее.
+    """
+    if len(_missing_labels(application)) == len(_FIELD_LABELS):
+        return GREETING_TEXT
+    return ask_missing_text(application)
+
+
+def ask_missing_text(application) -> str:
+    """Перечисляет ровно те поля, которых ещё не хватает; когда всё собрано — благодарность."""
+    missing = _missing_labels(application)
     if not missing:
         return THANKS_TEXT
     fields = ", ".join(missing)

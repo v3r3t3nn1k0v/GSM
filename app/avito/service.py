@@ -645,13 +645,16 @@ def _reply_text(
     """Что отправить клиенту по итогам function calling."""
     if result is not None and result.individual:
         return texts.INDIVIDUAL_TEXT
+    has_answer = bool(result and result.answer)
     if completed:
         # Заявка уже у менеджеров: на вопрос отвечаем, остальное — «менеджер свяжется»
-        tail = texts.MANAGER_CONTACT_TEXT if result and result.answer else texts.THANKS_TEXT
-    else:
+        tail = texts.MANAGER_CONTACT_TEXT if has_answer else texts.THANKS_TEXT
+    elif not has_answer:
         # Приветствие или сообщение без вопроса — предлагаем заполнить заявку
+        return texts.offer_text(application)
+    else:
         tail = texts.ask_missing_text(application)
-    if result is None or not result.answer:
+    if not has_answer:
         return tail
     return texts.compose_answer(result.answer, tail)
 
